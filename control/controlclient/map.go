@@ -194,8 +194,16 @@ func (ms *mapSession) HandleNonKeepAliveMapResponse(ctx context.Context, resp *t
 
 	ms.updateStateFromResponse(resp)
 
-	nm := ms.netmap()
+	if ms.tryHandleIncrementally(resp) {
+		ms.onConciseNetMapSummary(ms.lastNetmapSummary) // every 5s log
+		return nil
+	}
 
+	// We have to rebuild the whole netmap (lots of garbage & work downstream of
+	// our UpdateFullNetmap call). This is the part we tried to avoid but
+	// some field mutations (especially rare ones) aren't yet handled.
+
+	nm := ms.netmap()
 	ms.lastNetmapSummary = nm.VeryConcise()
 	ms.onConciseNetMapSummary(ms.lastNetmapSummary)
 
@@ -206,6 +214,52 @@ func (ms *mapSession) HandleNonKeepAliveMapResponse(ctx context.Context, resp *t
 
 	ms.nu.UpdateFullNetmap(nm)
 	return nil
+}
+
+func (ms *mapSession) tryHandleIncrementally(res *tailcfg.MapResponse) bool {
+	nud, ok := ms.nu.(NetmapDeltaUpdater)
+	if !ok {
+		return false
+	}
+
+	// TODO(bradfitz): add test to set each field non-zerp with reflect and test
+	// that this func is up to date with all fields.
+	if res.Node != nil ||
+		res.DERPMap != nil ||
+		res.DNSConfig != nil ||
+		res.Domain != "" ||
+		res.CollectServices != "" ||
+		res.PacketFilter != nil ||
+		res.UserProfiles != nil ||
+		res.Health != nil ||
+		res.SSHPolicy != nil ||
+		res.TKAInfo != nil ||
+		res.DomainDataPlaneAuditLogID != "" ||
+		res.Debug != nil ||
+		res.ControlDialPlan != nil ||
+		res.ClientVersion != nil {
+		return false
+	}
+
+	// All that remains is PeersChangedPatch, OnlineChange, LastSeenChange
+	for _, p := range res.PeersChangedPatch {
+		deltas, ok := netmap.NodeMutationsFromPatch(p)
+		if !ok {
+			return false
+		}
+		for _, d := range deltas {
+			nud.UpdateNetmapDelta(d)
+		}
+	}
+	for nid, v := range res.OnlineChange {
+		nud.UpdateNetmapDelta(netmap.OnlineMutation(nid, v))
+	}
+	for nid, v := range res.PeerSeenChange {
+		if v {
+			nud.UpdateNetmapDelta(netmap.LastSeenNowMutation(nid))
+		}
+	}
+	return true
 }
 
 // updateStats are some stats from updateStateFromResponse, primarily for

@@ -195,6 +195,16 @@ type NetmapUpdater interface {
 	// the diff themselves between the previous full & next full network maps.
 }
 
+// NetmapDeltaUpdater is an optional interface that can be implemented by
+// NetmapUpdater implementations to receive delta updates from the controlclient
+// rather than just full updates.
+type NetmapDeltaUpdater interface {
+	NetmapUpdater
+
+	// UpdateNetmapDelta is called with discrete changes to the network map.
+	UpdateNetmapDelta(netmap.NodeMutation)
+}
+
 // NewDirect returns a new Direct client.
 func NewDirect(opts Options) (*Direct, error) {
 	if opts.ServerURL == "" {

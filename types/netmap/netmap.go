@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"tailscale.com/tailcfg"
@@ -358,4 +360,99 @@ func eqViewsIgnoreNil[T comparable](a, b interface {
 		}
 	}
 	return true
+}
+
+// NodeMutation is the common interface for types that describe
+// the change of a node's state.
+type NodeMutation interface {
+	MutatingNodeID() tailcfg.NodeID
+}
+
+type mutatingNodeID tailcfg.NodeID
+
+func (m mutatingNodeID) MutatingNodeID() tailcfg.NodeID { return tailcfg.NodeID(m) }
+
+// NodeMutationDERPHome is a NodeMutation that says a node
+// has changed its DERP home region.
+type NodeMutationDERPHome struct {
+	mutatingNodeID
+	DERPRegion int
+}
+
+// NodeMutation is a NodeMutation that says a node's endpoints have changed.
+type NodeMutationEndpoints struct {
+	mutatingNodeID
+	Endpoints []netip.AddrPort
+}
+
+// NodeMutationOnline is a NodeMutation that says a node is now online or
+// offline.
+type NodeMutationOnline struct {
+	mutatingNodeID
+	Online bool
+}
+
+// OnlineMutation returns a NodeMutationOnline from nodeID and online.
+func OnlineMutation(nodeID tailcfg.NodeID, online bool) NodeMutationOnline {
+	return NodeMutationOnline{mutatingNodeID(nodeID), online}
+}
+
+// NodeMutationLastSeen is a NodeMutation that says a node's LastSeen
+// value should be set to the current time.
+type NodeMutationLastSeen struct {
+	mutatingNodeID
+	LastSeen time.Time
+}
+
+func LastSeenNowMutation(nodeID tailcfg.NodeID) NodeMutationLastSeen {
+	return NodeMutationLastSeen{mutatingNodeID(nodeID), time.Now()}
+}
+
+var peerChangeFields = sync.OnceValue(func() []reflect.StructField {
+	var fields []reflect.StructField
+	rt := reflect.TypeOf((*tailcfg.PeerChange)(nil)).Elem()
+	for i := 0; i < rt.NumField(); i++ {
+		fields = append(fields, rt.Field(i))
+	}
+	return fields
+})
+
+// NodeMutationsFromPatch returns the NodeMutations that
+// p describes. If p describes something not yet supported
+// by a specific NodeMutation type, it returns (nil, false).
+func NodeMutationsFromPatch(p *tailcfg.PeerChange) (_ []NodeMutation, ok bool) {
+	if p == nil || p.NodeID == 0 {
+		return nil, false
+	}
+	var ret []NodeMutation
+	rv := reflect.ValueOf(p).Elem()
+	for i, sf := range peerChangeFields() {
+		if rv.Field(i).IsZero() {
+			continue
+		}
+		switch sf.Name {
+		default:
+			// Unhandled field.
+			return nil, false
+		case "NodeID":
+			continue
+		case "DERPRegion":
+			ret = append(ret, NodeMutationDERPHome{mutatingNodeID(p.NodeID), p.DERPRegion})
+		case "Endpoints":
+			eps := make([]netip.AddrPort, len(p.Endpoints))
+			for i, epStr := range p.Endpoints {
+				var err error
+				eps[i], err = netip.ParseAddrPort(epStr)
+				if err != nil {
+					return nil, false
+				}
+			}
+			ret = append(ret, NodeMutationEndpoints{mutatingNodeID(p.NodeID), eps})
+		case "Online":
+			ret = append(ret, NodeMutationOnline{mutatingNodeID(p.NodeID), *p.Online})
+		case "LastSeen":
+			ret = append(ret, NodeMutationLastSeen{mutatingNodeID(p.NodeID), *p.LastSeen})
+		}
+	}
+	return ret, true
 }
