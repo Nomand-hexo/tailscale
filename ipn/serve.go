@@ -275,7 +275,7 @@ func (sc *ServeConfig) IsFunnelOn() bool {
 // The nodeAttrs arg should be the node's Self.Capabilities which should contain
 // the attribute we're checking for and possibly warning-capabilities for
 // Funnel.
-func CheckFunnelAccess(port uint16, nodeAttrs []string) error {
+func CheckFunnelAccess(port uint16, nodeAttrs []tailcfg.NodeCapability) error {
 	if !slices.Contains(nodeAttrs, tailcfg.CapabilityHTTPS) {
 		return errors.New("Funnel not available; HTTPS must be enabled. See https://tailscale.com/s/https.")
 	}
@@ -288,7 +288,7 @@ func CheckFunnelAccess(port uint16, nodeAttrs []string) error {
 // CheckFunnelPort checks whether the given port is allowed for Funnel.
 // It uses the tailcfg.CapabilityFunnelPorts nodeAttr to determine the allowed
 // ports.
-func CheckFunnelPort(wantedPort uint16, nodeAttrs []string) error {
+func CheckFunnelPort(wantedPort uint16, nodeAttrs []tailcfg.NodeCapability) error {
 	deny := func(allowedPorts string) error {
 		if allowedPorts == "" {
 			return fmt.Errorf("port %d is not allowed for funnel", wantedPort)
@@ -297,7 +297,8 @@ func CheckFunnelPort(wantedPort uint16, nodeAttrs []string) error {
 	}
 	var portsStr string
 	for _, attr := range nodeAttrs {
-		if !strings.HasPrefix(attr, tailcfg.CapabilityFunnelPorts) {
+		attr := string(attr)
+		if !strings.HasPrefix(attr, string(tailcfg.CapabilityFunnelPorts)) {
 			continue
 		}
 		u, err := url.Parse(attr)
@@ -309,7 +310,7 @@ func CheckFunnelPort(wantedPort uint16, nodeAttrs []string) error {
 			return deny("")
 		}
 		u.RawQuery = ""
-		if u.String() != tailcfg.CapabilityFunnelPorts {
+		if u.String() != string(tailcfg.CapabilityFunnelPorts) {
 			return deny("")
 		}
 	}

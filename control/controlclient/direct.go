@@ -1327,7 +1327,7 @@ func ControlOneCGNATSetting() opt.Bool {
 	return controlOneCGNAT.Load()
 }
 
-func setControlKnobsFromNodeAttrs(selfNodeAttrs []string) {
+func setControlKnobsFromNodeAttrs(selfNodeAttrs []tailcfg.NodeCapability) {
 	var (
 		keepFullWG          bool
 		disableDRPO         bool
