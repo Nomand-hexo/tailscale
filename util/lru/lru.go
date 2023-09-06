@@ -4,10 +4,6 @@
 // Package lru contains a typed Least-Recently-Used cache.
 package lru
 
-import (
-	"container/list"
-)
-
 // Cache is container type keyed by K, storing V, optionally evicting the least
 // recently used items if a maximum size is exceeded.
 //
@@ -22,14 +18,22 @@ type Cache[K comparable, V any] struct {
 	// an item is evicted. Zero means no limit.
 	MaxEntries int
 
-	ll *list.List
-	m  map[K]*list.Element // of *entry[K,V]
+	// l is a ring of LRU values. l points to the most recently used
+	// element, l.prev is the least recently used.
+	//
+	// An LRU is technically a simple list rather than a ring, but
+	// implementing it as a ring makes the list manipulation
+	// operations more regular, because the first/last positions in
+	// the list stop being special.
+	l *entry[K, V]
+	m map[K]*entry[K, V]
 }
 
-// entry is the element type for the container/list.Element.
+// entry is an entry of Cache.
 type entry[K comparable, V any] struct {
-	key   K
-	value V
+	prev, next *entry[K, V]
+	key        K
+	value      V
 }
 
 // Set adds or replaces a value to the cache, set or updating its associated
@@ -39,18 +43,17 @@ type entry[K comparable, V any] struct {
 // after any addition, the least recently used value is evicted.
 func (c *Cache[K, V]) Set(key K, value V) {
 	if c.m == nil {
-		c.m = make(map[K]*list.Element)
-		c.ll = list.New()
+		c.m = make(map[K]*entry[K, V])
 	}
-	if ee, ok := c.m[key]; ok {
-		c.ll.MoveToFront(ee)
-		ee.Value.(*entry[K, V]).value = value
+	if ent, ok := c.m[key]; ok {
+		c.moveToFront(ent)
+		ent.value = value
 		return
 	}
-	ele := c.ll.PushFront(&entry[K, V]{key, value})
-	c.m[key] = ele
+	ent := c.newAtFront(key, value)
+	c.m[key] = ent
 	if c.MaxEntries != 0 && c.Len() > c.MaxEntries {
-		c.DeleteOldest()
+		c.deleteOldest()
 	}
 }
 
@@ -76,9 +79,9 @@ func (c *Cache[K, V]) Contains(key K) bool {
 //
 // If found, key is moved to the front of the LRU.
 func (c *Cache[K, V]) GetOk(key K) (value V, ok bool) {
-	if ele, hit := c.m[key]; hit {
-		c.ll.MoveToFront(ele)
-		return ele.Value.(*entry[K, V]).value, true
+	if ent, hit := c.m[key]; hit {
+		c.moveToFront(ent)
+		return ent.value, true
 	}
 	var zero V
 	return zero, false
@@ -91,8 +94,8 @@ func (c *Cache[K, V]) GetOk(key K) (value V, ok bool) {
 // LRU. This should mostly be used for non-intrusive debug inspection
 // of the cache.
 func (c *Cache[K, V]) PeekOk(key K) (value V, ok bool) {
-	if ele, hit := c.m[key]; hit {
-		return ele.Value.(*entry[K, V]).value, true
+	if ent, hit := c.m[key]; hit {
+		return ent.value, true
 	}
 	var zero V
 	return zero, false
@@ -100,25 +103,66 @@ func (c *Cache[K, V]) PeekOk(key K) (value V, ok bool) {
 
 // Delete removes the provided key from the cache if it was present.
 func (c *Cache[K, V]) Delete(key K) {
-	if e, ok := c.m[key]; ok {
-		c.deleteElement(e)
+	if ent, ok := c.m[key]; ok {
+		c.deleteElement(ent)
 	}
 }
 
 // DeleteOldest removes the item from the cache that was least recently
 // accessed. It is a no-op if the cache is empty.
 func (c *Cache[K, V]) DeleteOldest() {
-	if c.ll != nil {
-		if e := c.ll.Back(); e != nil {
-			c.deleteElement(e)
-		}
+	if c.l != nil {
+		c.deleteOldest()
 	}
-}
-
-func (c *Cache[K, V]) deleteElement(e *list.Element) {
-	c.ll.Remove(e)
-	delete(c.m, e.Value.(*entry[K, V]).key)
 }
 
 // Len returns the number of items in the cache.
 func (c *Cache[K, V]) Len() int { return len(c.m) }
+
+// newAtFront creates a new LRU entry using key and value, and inserts
+// it at the front of c.l.
+func (c *Cache[K, V]) newAtFront(key K, value V) *entry[K, V] {
+	ret := &entry[K, V]{key: key, value: value}
+	if c.l == nil {
+		ret.prev = ret
+		ret.next = ret
+	} else {
+		ret.next = c.l
+		ret.prev = c.l.prev
+		c.l.prev.next = ret
+		c.l.prev = ret
+	}
+	c.l = ret
+	return ret
+}
+
+// moveToFront moves ent, which must be an element of c.l, to the
+// front of c.l.
+func (c *Cache[K, V]) moveToFront(ent *entry[K, V]) {
+	if c.l == ent {
+		return
+	}
+	ent.prev.next = ent.next
+	ent.next.prev = ent.prev
+	ent.prev = c.l.prev
+	ent.next = c.l
+	c.l.prev.next = ent
+	c.l.prev = ent
+	c.l = ent
+}
+
+// deleteOldest removes the oldest entry in the cache. Panics if there
+// are no entries in the cache.
+func (c *Cache[K, V]) deleteOldest() { c.deleteElement(c.l.prev) }
+
+// deleteElement removes ent, which must be an element of c.l, from
+// the cache.
+func (c *Cache[K, V]) deleteElement(ent *entry[K, V]) {
+	if ent.next == ent {
+		c.l = nil
+	} else {
+		ent.next.prev = ent.prev
+		ent.prev.next = ent.next
+	}
+	delete(c.m, ent.key)
+}
